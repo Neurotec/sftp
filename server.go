@@ -33,6 +33,7 @@ type Server struct {
 	pktChan       chan rxPacket
 	openFiles     map[string]*os.File
 	openFilesLock *sync.RWMutex
+	root          string
 	handleCount   int
 	maxTxPacket   uint32
 	workerCount   int
@@ -65,6 +66,10 @@ func (svr *Server) getHandle(handle string) (*os.File, bool) {
 	return f, ok
 }
 
+func (srv *Server) absolutePath(filename string) (string, error) {
+	return filepath.Abs(filepath.Join(srv.root, filepath.Clean(filename)))
+}
+
 type serverRespondablePacket interface {
 	encoding.BinaryUnmarshaler
 	id() uint32
@@ -86,6 +91,7 @@ func NewServer(in io.Reader, out io.WriteCloser, options ...ServerOption) (*Serv
 		pktChan:       make(chan rxPacket, sftpServerWorkerCount),
 		openFiles:     map[string]*os.File{},
 		openFilesLock: &sync.RWMutex{},
+		root:          "/",
 		maxTxPacket:   1 << 15,
 		workerCount:   sftpServerWorkerCount,
 	}
@@ -114,6 +120,18 @@ func WithDebug(w io.Writer) ServerOption {
 func ReadOnly() ServerOption {
 	return func(s *Server) error {
 		s.readOnly = true
+		return nil
+	}
+}
+
+// ChRoot configures a Server to serve from root directory
+func ChRoot(basepath string) ServerOption {
+	return func(s *Server) error {
+		path, err := filepath.Abs(basepath)
+		if err != nil {
+			return err
+		}
+		s.root = path
 		return nil
 	}
 }
@@ -428,7 +446,13 @@ func (p sshFxpOpenPacket) respond(svr *Server) error {
 		osFlags |= os.O_EXCL
 	}
 
-	f, err := os.OpenFile(p.Path, osFlags, 0644)
+	var filepath string
+	var err error
+	if filepath, err = svr.absolutePath(p.Path); err != nil {
+		return svr.sendPacket(statusFromError(p.ID, err))
+	}
+
+	f, err := os.OpenFile(filepath, osFlags, 0644)
 	if err != nil {
 		return svr.sendPacket(statusFromError(p.ID, err))
 	}
